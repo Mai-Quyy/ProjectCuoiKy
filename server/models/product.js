@@ -3,7 +3,7 @@ const mongoose = require("mongoose"); // Erase if already required
 // Declare the Schema of the Mongo model
 var productSchema = new mongoose.Schema(
   {
-    tile: {
+    title: {
       type: String,
       required: true,
       trim: true,
@@ -12,9 +12,9 @@ var productSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
-      lowerCase: true,
+      lowercase: true,
     },
-    desctiption: {
+    description: {
       type: String,
       required: true,
     },
@@ -24,7 +24,7 @@ var productSchema = new mongoose.Schema(
     },
     price: {
       type: Number,
-      require: true,
+      required: true,
     },
     category: {
       type: mongoose.Types.ObjectId,
@@ -43,7 +43,7 @@ var productSchema = new mongoose.Schema(
     },
     color: {
       type: String,
-      enum: ["Black", "Grown", "Red"],
+      enum: ["Blue", "Grown", "Red"],
     },
     ratings: [
       {
@@ -54,7 +54,7 @@ var productSchema = new mongoose.Schema(
     ],
     totalRating: {
       type: Number,
-      dafault: 0,
+      default: 0,
     },
   },
   { timestamps: true }
