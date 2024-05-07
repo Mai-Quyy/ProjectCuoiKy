@@ -16,6 +16,9 @@ var userSchema = new mongoose.Schema(
       required: true,
       // unique:true,
     },
+    avatar: {
+      type: String,
+    },
     email: {
       type: String,
       required: true,
@@ -32,13 +35,17 @@ var userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      default: "user",
+      enum: [1945, 1979],
+      default: 1979,
     },
     cart: [
       {
         product: { type: mongoose.Types.ObjectId, ref: "Product" },
         quantity: Number,
         color: String,
+        price: Number,
+        thumbnail: String,
+        title: String,
       },
     ],
     address: {

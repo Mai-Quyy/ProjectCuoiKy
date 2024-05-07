@@ -10,26 +10,60 @@ const sendMail = require("../untils/sendmail");
 const crypto = require("crypto");
 
 const register = asyncHandler(async (req, res) => {
-  const { email, password, firstname, lastname } = req.body;
-  // check để đỡ chậm cho db
-  if (!email || !password || !lastname || !firstname)
+  const { email, password, firstname, lastname, mobile } = req.body;
+  if (!email || !password || !lastname || !firstname || !mobile)
     return res.status(400).json({
       success: false,
-      mes: "Missing Inputs",
+      mes: "Missing inputs",
     });
-
   const user = await User.findOne({ email });
-  // chu dong bat loi
-  if (user) throw new Error("User has existed!");
+  if (user) throw new Error("User has existed");
   else {
-    const newUser = await User.create(req.body);
-    return res.status(200).json({
+    const token = makeToken();
+    const emailedited = btoa(email) + "@" + token;
+    const newUser = await User.create({
+      email: emailedited,
+      password,
+      firstname,
+      lastname,
+      mobile,
+    });
+    if (newUser) {
+      const html = `<h2>Register code:</h2><br /><blockquote>${token}</blockquote>`;
+      await sendMail({
+        email,
+        html,
+        subject: "Confirm register account in Digital World",
+      });
+    }
+    setTimeout(async () => {
+      await User.deleteOne({ email: emailedited });
+    }, [300000]);
+
+    return res.json({
       success: newUser ? true : false,
       mes: newUser
-        ? "Resgister is successfully. Please go login~"
-        : "Something went wrong",
+        ? "Please check your email to active account"
+        : "Some went wrong, please try later",
     });
   }
+});
+const finalRegister = asyncHandler(async (req, res) => {
+  // const cookie = req.cookies
+  const { token } = req.params;
+  const notActivedEmail = await User.findOne({
+    email: new RegExp(`${token}$`),
+  });
+  if (notActivedEmail) {
+    notActivedEmail.email = atob(notActivedEmail?.email?.split("@")[0]);
+    notActivedEmail.save();
+  }
+  return res.json({
+    success: notActivedEmail ? true : false,
+    mes: notActivedEmail
+      ? "Register is Successfully. Please go login."
+      : "Some went wrong, please try later",
+  });
 });
 // Refresh token => cấp mới token
 // Access token => Xác thực người dùng, phần quyền người dùng
@@ -73,8 +107,16 @@ const login = asyncHandler(async (req, res) => {
 });
 const getCurrent = asyncHandler(async (req, res) => {
   const { _id } = req.user;
-
-  const user = await User.findById(_id).select("-refreshToken -password -role");
+  const user = await User.findById(_id)
+    .select("-refreshToken -password")
+    .populate({
+      path: "cart",
+      populate: {
+        path: "product",
+        select: "title thumb price",
+      },
+    })
+    .populate("wishlist", "title thumb price color");
   return res.status(200).json({
     success: user ? true : false,
     rs: user ? user : "User not found",
@@ -141,18 +183,90 @@ const forgotPassword = asyncHandler(async (req, res) => {
   const data = {
     email,
     html,
+    subject: "Forgot password",
   };
   const rs = await sendMail(data);
   return res.status(200).json({
-    success: true,
-    rs,
+    success: rs.response?.includes("OK") ? true : false,
+    mes: rs.response?.includes("OK")
+      ? "Check your mail please."
+      : "Something went wrong. Please try later",
+  });
+});
+const resetPassword = asyncHandler(async (req, res) => {
+  const { password, token } = req.body;
+  if (!password || !token) throw new Error("Missing imputs");
+  const passwordResetToken = crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
+  const user = await User.findOne({
+    passwordResetToken,
+    passwordResetExpires: { $gt: Date.now() },
+  });
+  if (!user) throw new Error("Invalid reset token");
+  user.password = password;
+  user.passwordResetToken = undefined;
+  user.passwordChangedAt = Date.now();
+  user.passwordResetExpires = undefined;
+  await user.save();
+  return res.status(200).json({
+    success: user ? true : false,
+    mes: user ? "Updated password" : "Something went wrong",
   });
 });
 const getUsers = asyncHandler(async (req, res) => {
-  const response = await User.find().select("-refreshToken -password -role");
-  return res.status(200).json({
-    success: response ? true : false,
-    users: response,
+  const queries = { ...req.query };
+  const excludeFields = ["limit", "sort", "page", "fields"];
+  excludeFields.forEach((el) => delete queries[el]);
+
+  let queryString = JSON.stringify(queries);
+  queryString = queryString.replace(
+    /\b(gte|gt|lt|lte)\b/g,
+    (macthedEl) => `$${macthedEl}`
+  );
+  const formatedQueries = JSON.parse(queryString);
+  if (queries?.name)
+    formatedQueries.name = { $regex: queries.name, $options: "i" };
+  // const query = {}
+  // if (req.query.q) {
+  //     query = {$or : [
+  //         {name : { $regex: req.query.q, $options: 'i' }},
+  //         {email : { $regex: req.query.q, $options: 'i' }},
+  //     ]}
+  // }
+  if (req.query.q) {
+    delete formatedQueries.q;
+    formatedQueries["$or"] = [
+      { firstname: { $regex: req.query.q, $options: "i" } },
+      { lastname: { $regex: req.query.q, $options: "i" } },
+      { email: { $regex: req.query.q, $options: "i" } },
+    ];
+  }
+  let queryCommand = User.find(formatedQueries);
+
+  if (req.query.sort) {
+    const sortBy = req.query.sort.split(",").join(" ");
+    queryCommand = queryCommand.sort(sortBy);
+  }
+
+  if (req.query.fields) {
+    const fields = req.query.fields.split(",").join(" ");
+    queryCommand = queryCommand.select(fields);
+  }
+
+  const page = +req.query.page || 1;
+  const limit = +req.query.limit || process.env.LIMIT_PRODUCTS;
+  const skip = (page - 1) * limit;
+  queryCommand.skip(skip).limit(limit);
+  queryCommand.exec(async (err, response) => {
+    if (err) throw new Error(err.message);
+    const counts = await User.find(formatedQueries).countDocuments();
+    return res.status(200).json({
+      success: response ? true : false,
+      counts,
+      users: response ? response : "Cannot get products",
+    });
   });
 });
 const deleteUsers = asyncHandler(async (req, res) => {
@@ -170,16 +284,18 @@ const deleteUsers = asyncHandler(async (req, res) => {
 });
 const updateUsers = asyncHandler(async (req, res) => {
   const { _id } = req.user;
-
+  const { firstname, lastname, email, mobile, address } = req.body;
+  const data = { firstname, lastname, email, mobile, address };
+  if (req.file) data.avatar = req.file.path;
   if (!_id || Object.keys(req.body).length === 0)
     throw new Error("Missing input");
 
-  const response = await User.findByIdAndUpdate(_id, req.body, {
+  const response = await User.findByIdAndUpdate(_id, data, {
     new: true,
   }).select("-password -role -refreshToken");
   return res.status(200).json({
     success: response ? true : false,
-    updateUser: response ? response : "Something went wrong",
+    updateUser: response ? "Updated." : "Something went wrong",
   });
 });
 const updateUsersByAdmin = asyncHandler(async (req, res) => {
@@ -192,8 +308,124 @@ const updateUsersByAdmin = asyncHandler(async (req, res) => {
   }).select("-password -role -refreshToken");
   return res.status(200).json({
     success: response ? true : false,
-    updateUser: response ? response : "Something went wrong",
+    updateUser: response ? "Updated." : "Something went wrong",
   });
+});
+const updateUsersAddress = asyncHandler(async (req, res) => {
+  const { _id } = req.user;
+
+  if (!req.body.address) throw new Error("Missing input");
+
+  const response = await User.findByIdAndUpdate(
+    _id,
+    { $push: { address: req.body.address } },
+    {
+      new: true,
+    }
+  ).select("-password -role -refreshToken");
+  return res.status(200).json({
+    success: response ? true : false,
+    updateUserAddress: response ? response : "Something went wrong",
+  });
+});
+const updateCart = asyncHandler(async (req, res) => {
+  const { _id } = req.user;
+  const { pid, quantity = 1, color, price, thumbnail, title } = req.body;
+  if (!pid || !color) throw new Error("Missing inputs");
+  const user = await User.findById(_id).select("cart");
+  const alreadyProduct = user?.cart?.find(
+    (el) => el.product.toString() === pid && el.color === color
+  );
+  if (alreadyProduct) {
+    const response = await User.updateOne(
+      { cart: { $elemMatch: alreadyProduct } },
+      {
+        $set: {
+          "cart.$.quantity": quantity,
+          "cart.$.price": price,
+          "cart.$.thumbnail": thumbnail,
+          "cart.$.title": title,
+        },
+      },
+      { new: true }
+    );
+    return res.status(200).json({
+      success: response ? true : false,
+      mes: response ? "Updated your cart" : "Some thing went wrong",
+    });
+  } else {
+    const response = await User.findByIdAndUpdate(
+      _id,
+      {
+        $push: {
+          cart: { product: pid, quantity, color, price, thumbnail, title },
+        },
+      },
+      { new: true }
+    );
+    return res.status(200).json({
+      success: response ? true : false,
+      mes: response ? "Updated your cart" : "Some thing went wrong",
+    });
+  }
+});
+const removeProductInCart = asyncHandler(async (req, res) => {
+  const { _id } = req.user;
+  const { pid, color } = req.params;
+  const user = await User.findById(_id).select("cart");
+  const alreadyProduct = user?.cart?.find(
+    (el) => el.product.toString() === pid && el.color === color
+  );
+  if (!alreadyProduct)
+    return res.status(200).json({
+      success: true,
+      mes: "Updated your cart",
+    });
+  const response = await User.findByIdAndUpdate(
+    _id,
+    { $pull: { cart: { product: pid, color } } },
+    { new: true }
+  );
+  return res.status(200).json({
+    success: response ? true : false,
+    mes: response ? "Updated your cart" : "Some thing went wrong",
+  });
+});
+
+const createUsers = asyncHandler(async (req, res) => {
+  const response = await User.create(users);
+  return res.status(200).json({
+    success: response ? true : false,
+    users: response ? response : "Some thing went wrong",
+  });
+});
+
+const updateWishlist = asyncHandler(async (req, res) => {
+  const { pid } = req.params;
+  const { _id } = req.user;
+  const user = await User.findById(_id);
+  const alreadyInWishlist = user.wishlist?.find((el) => el.toString() === pid);
+  if (alreadyInWishlist) {
+    const response = await User.findByIdAndUpdate(
+      _id,
+      { $pull: { wishlist: pid } },
+      { new: true }
+    );
+    return res.json({
+      success: response ? true : false,
+      mes: response ? "Updated your wishlist." : "Failed to update wihlist!",
+    });
+  } else {
+    const response = await User.findByIdAndUpdate(
+      _id,
+      { $push: { wishlist: pid } },
+      { new: true }
+    );
+    return res.json({
+      success: response ? true : false,
+      mes: response ? "Updated your wishlist." : "Failed to update wihlist!",
+    });
+  }
 });
 module.exports = {
   register,
@@ -206,4 +438,11 @@ module.exports = {
   deleteUsers,
   updateUsers,
   updateUsersByAdmin,
+  updateUsersAddress,
+  updateCart,
+  finalRegister,
+  resetPassword,
+  updateWishlist,
+  createUsers,
+  removeProductInCart,
 };
